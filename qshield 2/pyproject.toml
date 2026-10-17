@@ -23,8 +23,8 @@ demo = ["streamlit>=1.35", "supabase"]
 qshield-local = "qshield_local:main"
 
 [tool.setuptools]
-packages = ["core"]
+packages = ["core", "core.browser_geo"]
 py-modules = ["qshield_sdk", "qshield_local"]
 
 [tool.setuptools.package-data]
-core = ["browser_geo/*.html"]
+"core.browser_geo" = ["index.html"]
