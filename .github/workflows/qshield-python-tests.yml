@@ -1,0 +1,52 @@
+name: QShield Python tests
+
+on:
+  push:
+    branches:
+      - main
+      - codex/geolocation-payment-risk
+  pull_request:
+    paths:
+      - "qshield 2/**"
+      - ".github/workflows/qshield-python-tests.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  python-tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    defaults:
+      run:
+        working-directory: qshield 2
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: "qshield 2/requirements*.txt"
+      - name: Install app and test dependencies
+        run: python -m pip install --upgrade pip && python -m pip install -r requirements-dev.txt
+      - name: Build wheel and verify browser component asset is packaged
+        run: |
+          python -m build --wheel --outdir /tmp/qshield-wheel
+          python - <<'PY'
+          from pathlib import Path
+          from zipfile import ZipFile
+          wheel = next(Path("/tmp/qshield-wheel").glob("qshield_sdk-*.whl"))
+          with ZipFile(wheel) as archive:
+              assert "core/browser_geo/index.html" in archive.namelist(), "geolocation component HTML missing from wheel"
+          print(f"Verified browser component asset in {wheel.name}")
+          PY
+      - name: Run focused geolocation and payment UI tests
+        env:
+          QSHIELD_SKIP_LARGE_TESTS: "1"
+        run: python -m pytest -q tests/test_geo_risk.py tests/test_geo_risk_ui.py tests/test_payment_ui.py tests/test_payment_otp_ui.py
+      - name: Run complete test suite (skip only the documented 2 GiB stress test)
+        env:
+          QSHIELD_SKIP_LARGE_TESTS: "1"
+        run: python -m pytest -q
