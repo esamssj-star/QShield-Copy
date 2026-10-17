@@ -28,6 +28,12 @@ In the Pay form, tick **Simulate QShield + Supabase outage** to send a successfu
 
 To accept the specific request shown on the Pay page, run `python3 backup-service/verify_deployment.py --accept TEST-...` from the repository root, replacing `TEST-...` with the displayed request ID. The helper asks only for the Wallet URL and Wallet request secret; it never asks for a card or Neon credential.
 
+## Independent demo page when QShield is unavailable
+
+Set `BACKUP_DEMO_PASSCODE` on the **creator** Render service to a new random value of at least 16 characters. Do not reuse the creator request secret or put the passcode in Git. The Blueprint lists this environment variable for new deployments; existing services must also add it in Render's Environment settings.
+
+After deploying this version, open `https://qshield-backup-creator.onrender.com/demo`. This page is served directly by the backup creator, so it works when the QShield Streamlit app or Supabase is unavailable. Enter only a `TEST-` order ID, a whole-rupee fake amount, and the demo access code. The server creates stable synthetic token and mock provider references, encrypts the handoff, and writes it to Neon. Retrying the same order and amount returns its existing status; changing the amount for the same order is rejected. Give the test order ID to the Wallet operator, who can run `verify_deployment.py --accept TEST-...` as above. The form never requests or handles card details, and no money moves. This is a demo page, not a real payment provider integration or automatic traffic failover.
+
 For a no-card local demo, install `requirements.txt`, put those same variables in the two terminal environments, then run `uvicorn creator:app --host 127.0.0.1 --port 8001` and `uvicorn wallet:app --host 127.0.0.1 --port 8002` from this folder. Set `CREATOR_URL=http://127.0.0.1:8001` and `WALLET_URL=http://127.0.0.1:8002` for the test client.
 
 ## What the demo proves
