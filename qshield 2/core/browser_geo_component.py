@@ -12,9 +12,6 @@ _COMPONENT = components.declare_component(
 )
 
 
-def get_browser_location():
+def get_browser_location(key: str = "qshield_browser_location_widget"):
     """Render a button that requests location only after an explicit user click."""
-    return _COMPONENT(
-        key="qshield_browser_location_widget",
-        default={"status": "idle"},
-    )
+    return _COMPONENT(key=key, default={"status": "idle"})
