@@ -25,3 +25,6 @@ qshield-local = "qshield_local:main"
 [tool.setuptools]
 packages = ["core"]
 py-modules = ["qshield_sdk", "qshield_local"]
+
+[tool.setuptools.package-data]
+core = ["browser_geo/*.html"]
