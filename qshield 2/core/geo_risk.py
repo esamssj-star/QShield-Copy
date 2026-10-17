@@ -316,6 +316,17 @@ def assess_locations(
                 "was blocked under the demo's fail-closed policy."
             ),
         )
+    if not observation.demo_mode and observation.source != "browser-geolocation":
+        return _unknown_assessment(
+            policy=policy,
+            branch_city=branch.city,
+            observation=observation,
+            reason_code="TXN_LOCATION_SOURCE_UNTRUSTED",
+            explanation=(
+                "The transaction location came from an unsupported source and could not be "
+                "verified reliably. This attempt was blocked under the demo policy."
+            ),
+        )
     if observation.source == "browser-geolocation":
         accuracy = observation.accuracy_m
         if (
