@@ -131,6 +131,21 @@ def test_inclusive_threshold_boundaries(distance, risk, decision):
     assert result.decision == decision
 
 
+def test_untrusted_non_demo_location_source_fails_closed():
+    branch = _branch_at_origin()
+    observation = LocationObservation(
+        point=GeoPoint(0, 0),
+        city="Unverified city",
+        source="untrusted-ip-lookup",
+        confidence="LOW",
+        demo_mode=False,
+    )
+    result = assess_locations(branch, observation)
+    assert result.risk_level == "UNKNOWN"
+    assert result.decision == "BLOCK"
+    assert result.reason_code == "TXN_LOCATION_SOURCE_UNTRUSTED"
+
+
 def test_browser_location_requires_valid_coordinates_and_accuracy():
     missing = browser_location_observation({"latitude": None, "longitude": None, "accuracy": None})
     invalid = browser_location_observation({"latitude": 100, "longitude": 0, "accuracy": 5})
