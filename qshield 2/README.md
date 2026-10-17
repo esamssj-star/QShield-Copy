@@ -13,6 +13,11 @@ approves or rejects the token (`created → sent → approved/rejected`).
   environment variables. The Wallet private key file stays with the Wallet person, not the server.
 - Tokens are stored in Supabase table `payment_tokens` (SQL in `core/token_store.py`); without
   Supabase they live in memory and the page says so.
+- Payments above ₹10,000 need a **dynamic one-time code** (`core/dynamic_credential.py`): a 6-digit code
+  bound to user, merchant, amount, currency and a unique transaction ID, valid 5 minutes, protected
+  with HMAC-SHA256, 3 wrong guesses then locked, consumed on first successful use. The demo shows the
+  code on screen (simulated delivery); a real app sends it to the user's trusted device. Set
+  `QSHIELD_OTC_KEY` (32+ chars) for a stable server key.
 - Not built yet: the backup route for when QShield is down. Not audited; not PCI-DSS compliant.
 - The older file-transfer demo (Receive / Send tabs) is still here: `streamlit run files_app.py`.
 

@@ -33,6 +33,11 @@ def init_state() -> None:
         "payment_attempt_id": None,
         "payment_error": None,
         "payment_token": None,
+        # Extra check for large payments (dynamic one-time credential). Holds no card data.
+        "otc_user_id": None,
+        "otc_issued": None,
+        "otc_verified": None,
+        "otc_error": None,
         # Handoff to the Wallet team (encrypted package only; never card details)
         "handoff_package": None,
         "handoff_code": None,
