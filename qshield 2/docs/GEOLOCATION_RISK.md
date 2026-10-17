@@ -49,6 +49,10 @@ From the application directory:
 
 Use a listed test card only. For the demonstration, first choose the Bengaluru demo account and “Same city as selected branch”; a valid test-card attempt follows the existing mock payment flow. Then start a new attempt and select “Berlin, Germany · international”; the screen should show HIGH risk and BLOCKED, with no provider result, payment token, wallet handoff, or success receipt. “Unknown location” and the two unconfigured synthetic branch cases also block.
 
+## Packaging check
+
+The custom browser-location component HTML is declared as package data in `pyproject.toml`. GitHub Actions builds a wheel and checks that `core/browser_geo/index.html` is included, so running from an installed package does not silently omit the component asset.
+
 ## Security and deployment limits
 
 The browser sends its geolocation observation to the Streamlit app, so a modified client could spoof it. The server-side gate is authoritative only within this demo's Python application process, not a substitute for a trusted bank/payment-processor authorization service. There is no persistent risk audit or production authorization endpoint. Never represent branch distance as a sole production fraud signal, do not use real account/card data, and do not claim that the prototype protects or transfers real money.
