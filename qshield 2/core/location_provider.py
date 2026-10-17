@@ -7,6 +7,14 @@ from typing import Any
 from core.geo_risk import GeoPoint, LocationObservation
 
 
+_COMPONENT_ERROR_CODES = {
+    "PERMISSION_DENIED": "TXN_LOCATION_PERMISSION_DENIED",
+    "POSITION_UNAVAILABLE": "TXN_LOCATION_UNAVAILABLE",
+    "TIMEOUT": "TXN_LOCATION_TIMEOUT",
+    "UNSUPPORTED": "TXN_LOCATION_UNSUPPORTED",
+}
+
+
 def browser_location_observation(payload: Any) -> LocationObservation:
     """Convert a browser geolocation component value without trusting its input.
 
@@ -15,6 +23,28 @@ def browser_location_observation(payload: Any) -> LocationObservation:
     the risk audit record.
     """
     if not isinstance(payload, dict):
+        return LocationObservation(
+            point=None,
+            city=None,
+            source="browser-geolocation",
+            confidence="UNKNOWN",
+            demo_mode=False,
+            reason_code="TXN_LOCATION_MISSING",
+        )
+
+    status = payload.get("status")
+    if status == "error":
+        raw_code = str(payload.get("code", "")).upper()
+        reason = _COMPONENT_ERROR_CODES.get(raw_code, "TXN_LOCATION_UNAVAILABLE")
+        return LocationObservation(
+            point=None,
+            city=None,
+            source="browser-geolocation",
+            confidence="UNKNOWN",
+            demo_mode=False,
+            reason_code=reason,
+        )
+    if status not in (None, "success"):
         return LocationObservation(
             point=None,
             city=None,
