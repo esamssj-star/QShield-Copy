@@ -1,8 +1,7 @@
 """MOCK payment provider for the QShield demo.
 
 This is a SIMULATION. No bank, card network or real payment processor is
-contacted and no money moves. Every result it returns carries `simulated=True`
-and the UI must say so.
+contacted and no money moves. Every result it returns carries simulated=True.
 
 Safety rules built in:
   - Only the documented TEST cards below are accepted. Any other number (even a
@@ -12,7 +11,6 @@ Safety rules built in:
   - Idempotency: charging twice with the same idempotency key returns the first
     result instead of creating a second payment.
 """
-
 from __future__ import annotations
 
 import re
@@ -89,25 +87,16 @@ def _check_expiry(raw: str, now: datetime) -> None:
         raise PaymentInputError("This card has expired.")
 
 
-def charge(
+def validate_payment_input(
     *,
     card_number: str,
     expiry: str,
     cvv: str,
     amount_paise: int,
-    idempotency_key: str,
-    ledger: dict,
-    currency: str = "INR",
     now: datetime | None = None,
-) -> PaymentResult:
-    """Run one simulated payment. `ledger` is a dict the caller keeps between
-    calls; it only ever holds PaymentResult objects (no card data)."""
+) -> None:
+    """Validate a mock payment without invoking/recording a payment operation."""
     now = now or datetime.now(timezone.utc)
-    if not idempotency_key:
-        raise PaymentInputError("Missing idempotency key.")
-    if idempotency_key in ledger:
-        return ledger[idempotency_key]  # retry: same payment, no second charge
-
     if not isinstance(amount_paise, int) or isinstance(amount_paise, bool):
         raise PaymentInputError("Amount must be a whole number of paise.")
     if not MIN_AMOUNT_PAISE <= amount_paise <= MAX_AMOUNT_PAISE:
@@ -123,6 +112,33 @@ def charge(
             "never enter a real card."
         )
 
+
+def charge(
+    *,
+    card_number: str,
+    expiry: str,
+    cvv: str,
+    amount_paise: int,
+    idempotency_key: str,
+    ledger: dict,
+    currency: str = "INR",
+    now: datetime | None = None,
+) -> PaymentResult:
+    """Run one simulated payment. ledger only holds results, never card data."""
+    now = now or datetime.now(timezone.utc)
+    if not idempotency_key:
+        raise PaymentInputError("Missing idempotency key.")
+    if idempotency_key in ledger:
+        return ledger[idempotency_key]  # retry: same payment, no second charge
+
+    validate_payment_input(
+        card_number=card_number,
+        expiry=expiry,
+        cvv=cvv,
+        amount_paise=amount_paise,
+        now=now,
+    )
+    number = _clean_number(card_number)
     outcome, message = TEST_CARDS[number]
     result = PaymentResult(
         status=outcome,
