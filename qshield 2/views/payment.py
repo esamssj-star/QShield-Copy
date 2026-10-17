@@ -1,11 +1,28 @@
 """Payment page: a fake test-card checkout backed by the MOCK provider."""
-
 import secrets
 
 import streamlit as st
 
 from core import dynamic_credential as otc
-from core.mock_provider import MAX_AMOUNT_PAISE, MIN_AMOUNT_PAISE, TEST_CARDS, PaymentInputError, charge
+from core.browser_geo_component import get_browser_location
+from core.geo_risk import (
+    DEMO_ACCOUNTS,
+    DEMO_SCENARIOS,
+    RiskAssessment,
+    demo_location,
+    format_distance_km,
+)
+from core.location_provider import browser_location_observation
+from core.mock_provider import (
+    MAX_AMOUNT_PAISE,
+    MIN_AMOUNT_PAISE,
+    TEST_CARDS,
+    PaymentInputError,
+    charge,
+    validate_payment_input,
+)
+from core.payment_flow import invoke_payment_provider
+from core.risk_gate import audit_record, evaluate_payment_location, payment_is_allowed
 from core.token_store import TokenError, get_store
 from core.wallet_handoff import HandoffError, build_handoff, load_config, payments_fingerprint
 import relay
@@ -13,6 +30,7 @@ import relay
 
 MERCHANT_ID = "qshield-demo-merchant"  # placeholder until there are real merchants
 CURRENCY = "INR"
+LOCATION_MODES = ("Simulated demo scenario", "Device GPS location")
 
 
 def _rupees(paise: int) -> str:
@@ -69,35 +87,96 @@ def _check_code() -> None:
     ss["otc_error"] = None
 
 
+def _clear_old_attempt_state() -> None:
+    ss = st.session_state
+    ss["payment_error"] = None
+    ss["payment_token"] = None
+    ss["payment_result"] = None
+    ss["handoff_package"] = None
+    ss["handoff_code"] = None
+    ss["handoff_error"] = None
+    ss["geo_last_assessment"] = None
+    ss["geo_blocked_attempt_id"] = None
+
+
+def _selected_location_observation():
+    ss = st.session_state
+    if ss.get("geo_location_mode") == "Device GPS location":
+        return browser_location_observation(ss.get("geo_browser_payload"))
+    return demo_location(
+        ss.get("geo_scenario", "same_city"),
+        ss.get("geo_account_id", "demo-acct-blr"),
+    )
+
+
 def _submit() -> None:
-    """Runs when the form is submitted. Uses the card details once, then wipes
-    them from session state so the full number never lingers in server memory."""
+    """Validate and risk-screen the attempt before any mock provider approval."""
     ss = st.session_state
     name, number, expiry, cvv = ss["pay_name"], ss["pay_card"], ss["pay_expiry"], ss["pay_cvv"]
     amount_paise = _amount_paise()
-    ss["pay_card"] = ss["pay_expiry"] = ss["pay_cvv"] = ""  # wipe first, use local copies below
-    ss["payment_error"] = None
-    ss["payment_token"] = None
-    ss["payment_result"] = None  # a failed attempt must not leave an old success on screen
+    # Wipe widget state first. These local values are needed only for this callback.
+    ss["pay_card"] = ss["pay_expiry"] = ss["pay_cvv"] = ""
+    _clear_old_attempt_state()
+
     if not name.strip():
         ss["payment_error"] = "Enter the name on the card."
         return
-    # Server-side gate: even if the button were somehow pressed, a large payment never
-    # reaches the provider without a credential that was verified for this exact attempt + amount.
-    if otc.requires_verification(amount_paise) and not _is_verified(amount_paise):
-        ss["payment_error"] = "Payments above ₹10,000 need the verification code first."
-        return
+
+    # Validate the full request without calling or recording a payment provider operation.
     try:
-        result = charge(
-            card_number=number, expiry=expiry, cvv=cvv, amount_paise=amount_paise,
-            idempotency_key=ss["payment_attempt_id"], ledger=ss["payment_ledger"],
+        validate_payment_input(
+            card_number=number,
+            expiry=expiry,
+            cvv=cvv,
+            amount_paise=amount_paise,
         )
     except PaymentInputError as exc:
         ss["payment_error"] = str(exc)
         return
+
+    # The existing one-time credential is tied to this exact attempt and amount.
+    if otc.requires_verification(amount_paise) and not _is_verified(amount_paise):
+        ss["payment_error"] = "Payments above ₹10,000 need the verification code first."
+        return
+
+    attempt_ref = ss["payment_attempt_id"]
+    observation = _selected_location_observation()
+    assessment = evaluate_payment_location(ss.get("geo_account_id", "demo-acct-blr"), observation)
+    ss["geo_last_assessment"] = assessment
+    ss.setdefault("geo_risk_audit", []).append(audit_record(attempt_ref, assessment))
+
+    # This guard is before charge(), token creation, wallet handoff, and all success UI.
+    if not payment_is_allowed(assessment):
+        ss["geo_blocked_attempt_id"] = attempt_ref
+        ss["payment_error"] = None
+        # BLOCKED is terminal for this attempt: rotate its reference and invalidate
+        # any one-time code so a later action is necessarily a new attempt.
+        ss["payment_attempt_id"] = secrets.token_urlsafe(16)
+        ss["otc_verified"] = ss["otc_issued"] = ss["otc_error"] = None
+        return
+
+    try:
+        result = invoke_payment_provider(
+            assessment,
+            charge,
+            card_number=number,
+            expiry=expiry,
+            cvv=cvv,
+            amount_paise=amount_paise,
+            idempotency_key=attempt_ref,
+            ledger=ss["payment_ledger"],
+        )
+        if result is None:
+            # Defensive second guard: None cannot be rendered as payment success.
+            ss["payment_error"] = "The location risk check did not authorize this payment."
+            return
+    except PaymentInputError as exc:
+        ss["payment_error"] = str(exc)
+        return
+
     ss["payment_result"] = result
     ss["payment_attempt_id"] = secrets.token_urlsafe(16)  # next submit = a NEW payment
-    ss["otc_verified"] = ss["otc_issued"] = ss["otc_error"] = None  # the old credential does not carry over
+    ss["otc_verified"] = ss["otc_issued"] = ss["otc_error"] = None
     if result.status == "succeeded":
         _issue_token()
         _send_to_wallet(number, expiry, name)
@@ -140,6 +219,153 @@ def _issue_token() -> None:
         ss["payment_error"] = f"Payment succeeded, but the token was not saved: {exc}"
 
 
+def _reset_location_demo() -> None:
+    """Clear only geolocation controls/records, not payment or unrelated QShield state."""
+    ss = st.session_state
+    ss["geo_account_id"] = "demo-acct-blr"
+    ss["geo_location_mode"] = "Simulated demo scenario"
+    ss["geo_scenario"] = "same_city"
+    ss["geo_browser_payload"] = None
+    ss["geo_last_assessment"] = None
+    ss["geo_blocked_attempt_id"] = None
+    ss["geo_risk_audit"] = []
+    ss["geo_previous_mode"] = "Simulated demo scenario"
+    ss["geo_component_generation"] = ss.get("geo_component_generation", 0) + 1
+    ss["geo_previous_selection"] = None
+
+
+def _show_location_controls() -> None:
+    ss = st.session_state
+    with st.expander("Location risk demo controls"):
+        st.caption(
+            "Test facility only. Demo locations are simulated and do not change your "
+            "device GPS. Only synthetic accounts are available."
+        )
+        st.selectbox(
+            "Synthetic account / registered branch",
+            options=list(DEMO_ACCOUNTS.keys()),
+            format_func=lambda key: DEMO_ACCOUNTS[key].label,
+            key="geo_account_id",
+        )
+        st.radio(
+            "Transaction location source",
+            options=list(LOCATION_MODES),
+            key="geo_location_mode",
+        )
+
+        mode = ss["geo_location_mode"]
+        previous_mode = ss.get("geo_previous_mode")
+        if previous_mode is None:
+            ss["geo_previous_mode"] = mode
+        elif previous_mode != mode:
+            ss["geo_browser_payload"] = None
+            ss["geo_component_generation"] = ss.get("geo_component_generation", 0) + 1
+            ss["geo_previous_mode"] = mode
+
+        if mode == "Simulated demo scenario":
+            st.selectbox(
+                "Simulated transaction location",
+                options=list(DEMO_SCENARIOS.keys()),
+                format_func=lambda key: DEMO_SCENARIOS[key],
+                key="geo_scenario",
+            )
+        else:
+            st.caption(
+                "The browser asks permission only after you press the button below. "
+                "No continuous tracking or third-party geocoding is used."
+            )
+            payload = get_browser_location(
+                key=f"qshield_browser_location_{ss.get('geo_component_generation', 0)}"
+            )
+            if isinstance(payload, dict) and payload.get("status") in {"success", "error"}:
+                ss["geo_browser_payload"] = payload
+            if not ss.get("geo_browser_payload"):
+                st.info("No device reading yet. Request a location, or choose a demo scenario.")
+            elif ss["geo_browser_payload"].get("status") == "error":
+                code = ss["geo_browser_payload"].get("code", "")
+                safe_errors = {
+                    "PERMISSION_DENIED": "Location permission was denied.",
+                    "POSITION_UNAVAILABLE": "The browser could not obtain a location.",
+                    "TIMEOUT": "The location request timed out.",
+                    "UNSUPPORTED": "This browser does not support device location.",
+                }
+                st.info(safe_errors.get(code, "The browser location is unavailable."))
+            else:
+                st.success("A device location reading is available for the next assessment.")
+
+        st.caption(
+            "Demo policy: under 100 km = LOW / allow; 100–499.999 km = MEDIUM / "
+            "warning; 500 km or more = HIGH / block. Unknown location data is blocked."
+        )
+        st.button(
+            "Reset location demo",
+            key="geo_reset_demo",
+            on_click=_reset_location_demo,
+        )
+
+        selection = (
+            ss.get("geo_account_id"),
+            ss.get("geo_location_mode"),
+            ss.get("geo_scenario") if mode == "Simulated demo scenario" else None,
+        )
+        previous_selection = ss.get("geo_previous_selection")
+        if previous_selection is not None and previous_selection != selection:
+            ss["geo_last_assessment"] = None
+        ss["geo_previous_selection"] = selection
+
+
+def _show_risk_assessment(assessment: RiskAssessment | None) -> None:
+    if assessment is None or assessment.risk_level == "LOW":
+        return
+    if assessment.decision == "BLOCK":
+        st.error("### Transaction Blocked for Your Protection")
+        st.write(assessment.user_safe_explanation)
+        st.markdown(f"**Registered branch:** {assessment.branch_location or 'Not configured'}")
+        st.markdown(
+            f"**Detected transaction location:** {assessment.transaction_location or 'Unavailable'}"
+        )
+        st.markdown(f"**Approximate distance:** {format_distance_km(assessment.distance_km)}")
+        st.markdown(f"**Risk category:** {assessment.risk_level}")
+        st.markdown("**Transaction status:** BLOCKED")
+        st.caption(
+            "This attempt did not reach payment approval. Verify your location/account details "
+            "or contact your bank. This QShield payment provider is a simulation."
+        )
+    elif assessment.risk_level == "MEDIUM":
+        st.warning(
+            "Location warning: "
+            f"{format_distance_km(assessment.distance_km)} from the registered branch. "
+            "The demo policy allows this payment to continue with a warning."
+        )
+    else:
+        st.warning(
+            "Transaction not allowed: the branch or transaction location could not be "
+            "verified. The demo's fail-closed policy blocks unknown locations."
+        )
+
+
+def _show_risk_audit() -> None:
+    records = st.session_state.get("geo_risk_audit", [])
+    if not records:
+        return
+    with st.expander("Location risk audit · current session only"):
+        st.caption(
+            "Session-memory demonstration record only; it is not a persistent or bank audit log. "
+            "Exact coordinates and full account identifiers are not stored here."
+        )
+        display = []
+        for record in records:
+            display.append({
+                "Transaction ref": str(record["transaction_ref"])[-8:],
+                "Risk": record["risk_level"],
+                "Decision": record["decision"],
+                "Distance": format_distance_km(record["distance_km"]),
+                "Reason": record["reason_code"],
+                "Simulated": record["simulated"],
+            })
+        st.table(display)
+
+
 def show_payment() -> None:
     st.subheader("Pay (test mode)")
     st.warning(
@@ -154,6 +380,8 @@ def show_payment() -> None:
 
     if st.session_state["payment_attempt_id"] is None:
         st.session_state["payment_attempt_id"] = secrets.token_urlsafe(16)
+
+    _show_location_controls()
 
     st.number_input(
         "Amount (₹)", min_value=MIN_AMOUNT_PAISE / 100, max_value=MAX_AMOUNT_PAISE / 100,
@@ -178,13 +406,15 @@ def show_payment() -> None:
     if st.session_state.get("payment_error"):
         st.error(st.session_state["payment_error"])
 
+    _show_risk_assessment(st.session_state.get("geo_last_assessment"))
+
     result = st.session_state["payment_result"]
     if result is not None:
         if result.status == "succeeded":
             st.success(f"{result.message} {_rupees(result.amount_paise)} on {result.brand} •••• {result.last4}")
         else:
             st.error(f"{result.message} {result.brand} •••• {result.last4}")
-        st.caption(f"Provider reference: `{result.provider_ref}` · {result.created_at} · SIMULATED")
+        st.caption(f"Provider reference: {result.provider_ref} · {result.created_at} · SIMULATED")
         st.caption("Only the brand and last 4 digits are kept. The full card number is discarded.")
 
         if result.status == "succeeded":
@@ -200,9 +430,11 @@ def show_payment() -> None:
                 )
                 _show_handoff()
 
+    _show_risk_audit()
+
 
 def _show_verification(amount_paise: int) -> None:
-    """Step-up check for payments above ₹10,000: a one-time code tied to this payment."""
+    """Step-up check for payments above Rs 10,000: a one-time code tied to this payment."""
     ss = st.session_state
     st.info(f"🔐 Payments above ₹{otc.OTP_THRESHOLD_PAISE // 100:,} need a one-time verification code.")
     if _is_verified(amount_paise):
