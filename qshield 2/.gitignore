@@ -1,0 +1,7 @@
+
+venv/
+.venv/
+.venv312/
+__pycache__/
+.DS_Store
+wallet_private_key.pem
